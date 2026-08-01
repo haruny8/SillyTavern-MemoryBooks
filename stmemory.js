@@ -1450,12 +1450,15 @@ export function appendAdditionalContextSection(sceneHeader, additionalContextEnt
  */
 function formatSceneForAI(messages, metadata, previousSummariesContext = [], additionalContextEntries = []) {
     const messageLines = messages.map(message => {
-        const speaker = message.name || translate(
-            'Unknown',
-            'STMemoryBooks_PromptFrame_UnknownSpeaker',
-        );
-        const content = (message.mes || '').trim();
-        return content ? `${speaker}: ${content}` : null;
+      const content = (message.mes || '').trim();
+      if (!content) return null;
+      const speaker = message.name || translate(
+        'Unknown',
+        'STMemoryBooks_PromptFrame_UnknownSpeaker',
+      );
+      const role = message.is_user ? 'user' : 'assistant';
+      const id = (message.id !== undefined && message.id !== null) ? message.id : '';
+      return `<msg id="${id}" role="${role}" name="${speaker}">\n${content}\n</msg>`;
     }).filter(Boolean); // Filter out any empty/null messages
         
     const sceneHeader = [
@@ -1502,6 +1505,8 @@ function formatSceneForAI(messages, metadata, previousSummariesContext = [], add
         "=== SCENE TRANSCRIPT ===",
         "STMemoryBooks_PromptFrame_SceneTranscriptStart",
     ));
+    sceneHeader.push(`Total messages in scene: ${messageLines.length}`);
+    sceneHeader.push("");
     sceneHeader.push(...messageLines);
     sceneHeader.push("");
     sceneHeader.push(translate(
