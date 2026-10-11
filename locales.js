@@ -256,6 +256,7 @@ export const localeData_en = {
     'STMemoryBooks_Compaction_TypeSidePrompt': 'SidePrompt',
     'STMemoryBooks_Compaction_TypeMemory': 'Memory',
     "STMemoryBooks_Extract_HiddenOnly": "Hidden only",
+    "STMemoryBooks_Extract_UnhiddenOnly": "Unhidden only",
     "STMemoryBooks_Extract_Hidden": "Hidden",
     "STMemoryBooks_Extract_OutsideCount": "Outside displayed results: {{count}}",
     "STMemoryBooks_Extract_UnfinishedEdit": "Finish or cancel the message edit, then refresh results.",

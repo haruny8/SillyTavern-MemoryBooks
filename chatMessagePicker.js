@@ -4,9 +4,10 @@
 import { fingerprintChatMessage, validateChatSelection } from './chatSelection.js';
 
 /** Finds literal matches across the full chat, including explicitly filterable hidden messages. */
-export function findPickerMessages(messages, query = '', hiddenOnly = false) {
+export function findPickerMessages(messages, query = '', hiddenOnly = false, unhiddenOnly = false) {
     const term = String(query).trim().toLocaleLowerCase();
     return messages.flatMap((message, index) => message && (!hiddenOnly || message.is_system)
+        && (!unhiddenOnly || !message.is_system)
         && (!term || `${message.name || ''} ${message.mes || ''}`.toLocaleLowerCase().includes(term))
         ? [{ index, hash: fingerprintChatMessage(message), name: String(message.name || ''),
             text: String(message.mes || ''), hidden: Boolean(message.is_system) }] : []);
@@ -70,15 +71,15 @@ export async function showChatMessagePicker({ Popup, popupType, affirmativeResul
     input.setAttribute('aria-label', input.placeholder);
     const hidden = node('input');
     hidden.type = 'checkbox';
-    hidden.checked = initialSelection?.hiddenOnly === true;
+    hidden.checked = initialSelection?.unhiddenOnly !== false;
     const hiddenLabel = node('label', '', 'checkbox_label');
-    hiddenLabel.append(hidden, node('span', tr('STMemoryBooks_Extract_HiddenOnly', 'Hidden only')));
+    hiddenLabel.append(hidden, node('span', tr('STMemoryBooks_Extract_UnhiddenOnly', 'Unhidden only')));
     const status = node('p');
     status.setAttribute('role', 'status');
     const selectionStatus = node('p');
     selectionStatus.setAttribute('role', 'status');
     const results = node('div', '', 'stmb-extract-results');
-    const selection = () => ({ chatKey, query: input.value.trim(), hiddenOnly: hidden.checked,
+    const selection = () => ({ chatKey, query: input.value.trim(), unhiddenOnly: hidden.checked,
         messages: [...selected.values()].sort((a, b) => a.index - b.index) });
     const isCurrent = () => !closed && getChatKey() === chatKey;
     const update = () => {
@@ -147,7 +148,7 @@ export async function showChatMessagePicker({ Popup, popupType, affirmativeResul
             const adjacentIndex = message.index + offset;
             const adjacentButton = button(tr(`STMemoryBooks_Extract_${key}`, label), () => {
                 if (!messageIsCurrent()) return;
-                const adjacent = findPickerMessages(getMessages().slice(adjacentIndex, adjacentIndex + 1))[0];
+                const adjacent = findPickerMessages(getMessages().slice(adjacentIndex, adjacentIndex + 1), '', false, hidden.checked)[0];
                 if (!adjacent) return;
                 addRow({ ...adjacent, index: adjacentIndex });
                 update();
@@ -171,7 +172,7 @@ export async function showChatMessagePicker({ Popup, popupType, affirmativeResul
         clearTimeout(timer);
         timer = null;
         if (!valid()) return;
-        matches = findPickerMessages(getMessages(), input.value, hidden.checked);
+        matches = findPickerMessages(getMessages(), input.value, false, hidden.checked);
         loaded = 0;
         rows.clear();
         results.replaceChildren();

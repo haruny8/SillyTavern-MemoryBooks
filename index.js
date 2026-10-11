@@ -166,6 +166,13 @@ import {
   runClipReviewAfterMemory,
   showClipReviewSuggestionsPopup,
 } from "./clipReview.js";
+import { showChatMessagePicker } from "./chatMessagePicker.js";
+import {
+  buildChatConsolidationEntries,
+  chatIndicesToRanges,
+  getChatSourceIndices,
+  verifyChatConsolidationEntries,
+} from "./chatConsolidationSource.js";
 import { CLIP_REVIEW_METADATA_KEY, normalizeMemoryAssistanceMode } from "./clipReviewPolicy.js";
 import { collectSetRuntimeMacros, listSets, listTemplates } from "./sidePromptsManager.js";
 import {
@@ -6566,6 +6573,30 @@ function collectSummaryMemberIds(candidates) {
   return ids;
 }
 
+function getChatConsolidationRanges(selectedEntries, candidates) {
+  return chatIndicesToRanges(
+    getChatSourceIndices(selectedEntries, collectSummaryMemberIds(candidates)),
+  );
+}
+
+async function applyChatConsolidationAutoHide({
+  chatRef = null,
+  selectedEntries = [],
+  candidates = [],
+  disableOriginals = false,
+} = {}) {
+  if (!disableOriginals || !Array.isArray(selectedEntries) || selectedEntries.length === 0) return;
+  if (isStmbJobChatCurrent(chatRef)) {
+    try {
+      verifyChatConsolidationEntries(chat, selectedEntries);
+    } catch (error) {
+      console.warn("STMemoryBooks: chat consolidation auto-hide skipped after source change:", error);
+      return;
+    }
+  }
+  await applyQueuedAutoHideRanges(chatRef, getChatConsolidationRanges(selectedEntries, candidates));
+}
+
 function getEntriesById(selectedEntries, ids) {
   const wanted = new Set(Array.from(ids || []).map(String));
   return (selectedEntries || []).filter((entry) => {
@@ -6632,6 +6663,7 @@ async function runConsolidationPreviewWorkflow({
         canceled: false,
         created: committedResults.length,
         leftovers: Array.from(pendingIds),
+        committedCandidates,
       };
     }
 
@@ -6662,6 +6694,7 @@ async function runConsolidationPreviewWorkflow({
         canceled: true,
         created: committedResults.length,
         leftovers: Array.from(pendingIds),
+        committedCandidates,
       };
     }
 
@@ -6694,6 +6727,7 @@ async function runConsolidationPreviewWorkflow({
     canceled: false,
     created: committedResults.length,
     leftovers: Array.from(pendingIds),
+    committedCandidates,
   };
 }
 
@@ -6722,9 +6756,13 @@ async function executeQueuedConsolidationJob(job, jobContext) {
     ));
   }
   const targetTier = clampInt(Number(payload.targetTier), 1, 6);
+  const chatSourceMode = payload.chatSourceMode === true;
   const selectedEntries = Array.isArray(payload.selectedEntries) ? payload.selectedEntries : [];
   if (!lorebookName || selectedEntries.length === 0) {
     throw new Error("Consolidation job snapshot is incomplete.");
+  }
+  if (chatSourceMode) {
+    verifyChatConsolidationEntries(chat, selectedEntries);
   }
 
   jobContext.setState("generating", {
@@ -6795,14 +6833,19 @@ async function executeQueuedConsolidationJob(job, jobContext) {
                 if (!freshLorebook?.entries) {
                   throw new Error(`Lorebook "${lorebookName}" could not be loaded.`);
                 }
-                verifyConsolidationSourceFingerprints(
-                  freshLorebook,
-                  payload.sourceFingerprints || {},
-                  collectSummaryMemberIds(candidates),
-                );
+                if (chatSourceMode) {
+                  verifyChatConsolidationEntries(chat, selectedEntries);
+                } else {
+                  verifyConsolidationSourceFingerprints(
+                    freshLorebook,
+                    payload.sourceFingerprints || {},
+                    collectSummaryMemberIds(candidates),
+                  );
+                }
                 result = await commitSummaryEntries({
                   consolidationRunId,
                   chatRef: job.chatRef,
+                  chatSourceMode,
                   onCheckpoint: id => jobContext.patch({ payload: {
                     ...jobContext.job.payload,
                     consolidationCheckpointIds: [...(jobContext.job.payload.consolidationCheckpointIds || []), id],
@@ -6811,7 +6854,7 @@ async function executeQueuedConsolidationJob(job, jobContext) {
                   lorebookData: freshLorebook,
                   summaryCandidates: candidates,
                   targetTier,
-                  disableOriginals: !!payload.disableOriginals,
+                  disableOriginals: chatSourceMode ? false : !!payload.disableOriginals,
                   summaryEntrySettings: payload.summaryEntrySettings,
                   orderMode: payload.summaryOrderMode,
                   orderValue: payload.summaryOrderValue,
@@ -6857,6 +6900,14 @@ async function executeQueuedConsolidationJob(job, jobContext) {
       lorebookData: latestCommittedLorebookData,
       chatRef: job.chatRef,
     });
+    if (chatSourceMode && created > 0) {
+      await applyChatConsolidationAutoHide({
+        chatRef: job.chatRef,
+        selectedEntries,
+        candidates: previewResult?.committedCandidates || [],
+        disableOriginals: !!payload.disableOriginals,
+      });
+    }
     return;
   }
 
@@ -6868,10 +6919,15 @@ async function executeQueuedConsolidationJob(job, jobContext) {
     if (!freshLorebook?.entries) {
       throw new Error(`Lorebook "${lorebookName}" could not be loaded.`);
     }
-    verifyConsolidationSourceFingerprints(freshLorebook, payload.sourceFingerprints || {});
+    if (chatSourceMode) {
+      verifyChatConsolidationEntries(chat, selectedEntries);
+    } else {
+      verifyConsolidationSourceFingerprints(freshLorebook, payload.sourceFingerprints || {});
+    }
     const result = await commitSummaryEntries({
       consolidationRunId: job.id,
       chatRef: job.chatRef,
+      chatSourceMode,
       onCheckpoint: id => jobContext.patch({ payload: {
         ...jobContext.job.payload,
         consolidationCheckpointIds: [...(jobContext.job.payload.consolidationCheckpointIds || []), id],
@@ -6880,7 +6936,7 @@ async function executeQueuedConsolidationJob(job, jobContext) {
       lorebookData: freshLorebook,
       summaryCandidates,
       targetTier,
-      disableOriginals: !!payload.disableOriginals,
+      disableOriginals: chatSourceMode ? false : !!payload.disableOriginals,
       summaryEntrySettings: payload.summaryEntrySettings,
       orderMode: payload.summaryOrderMode,
       orderValue: payload.summaryOrderValue,
@@ -6903,6 +6959,14 @@ async function executeQueuedConsolidationJob(job, jobContext) {
     lorebookData: latestCommittedLorebookData,
     chatRef: job.chatRef,
   });
+  if (chatSourceMode && created > 0) {
+    await applyChatConsolidationAutoHide({
+      chatRef: job.chatRef,
+      selectedEntries,
+      candidates: summaryCandidates,
+      disableOriginals: !!payload.disableOriginals,
+    });
+  }
 }
 
 async function showConsolidationRecoveryPopup() {
@@ -9615,6 +9679,20 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
     content += "</div>";
 
     content += '<div class="world_entry_form_control">';
+    content += `<label for="stmb-consolidation-source"><strong>${escapeHtml(translate("Consolidation sources", "STMemoryBooks_Consolidation_SourceMode"))}:</strong></label>`;
+    content += '<select id="stmb-consolidation-source" class="text_pole">';
+    content += `<option value="lorebook" selected>${escapeHtml(translate("Memory Book entries", "STMemoryBooks_Consolidation_SourceLorebook"))}</option>`;
+    content += `<option value="chat">${escapeHtml(translate("Chat history messages", "STMemoryBooks_Consolidation_SourceChat"))}</option>`;
+    content += '</select>';
+    content += `<small class="opacity70p">${escapeHtml(translate("Use selected chat messages directly as source material. The generated summary is still saved as a normal STMB Summary Tier entry.", "STMemoryBooks_Consolidation_SourceModeDesc"))}</small>`;
+    content += '</div>';
+
+    content += '<div id="stmb-consolidation-chat-source" class="world_entry_form_control displayNone">';
+    content += `<button id="stmb-consolidation-select-chat" class="menu_button">${escapeHtml(translate("Select chat messages", "STMemoryBooks_Consolidation_SelectChat"))}</button>`;
+    content += '<span id="stmb-consolidation-chat-status" class="opacity70p"></span>';
+    content += '</div>';
+
+    content += '<div class="world_entry_form_control">';
     content += `<label><strong>${escapeHtml(translate("Summary Tier", "STMemoryBooks_SummaryTier_Label"))}:</strong> `;
     content += '<select id="stmb-summary-tier" class="text_pole">';
     for (const cfg of tierOptions) {
@@ -9727,6 +9805,8 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
     content += "</div>";
 
     let popup;
+    let chatSourceSelection = null;
+    let chatSourceEntries = [];
     const persistSummaryConsolidationPopupSettings = (popupElement) => {
       if (!popupElement) {
         return false;
@@ -9799,7 +9879,10 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
     }
     const getCurrentTargetTier = () =>
       clampInt(readIntInput(dlg.querySelector("#stmb-summary-tier"), 1), 1, 6);
+    const getSourceMode = () =>
+      String(dlg.querySelector("#stmb-consolidation-source")?.value || "lorebook");
     const getCandidatesForTier = (targetTier) => {
+      if (getSourceMode() === "chat") return chatSourceEntries;
       const eligibleEntries = allEntries.filter((entry) =>
         isEligibleSummarySourceEntry(entry, getSourceTierForTarget(targetTier)),
       );
@@ -9868,6 +9951,8 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
       const sourcePlural = pluralizeSummaryLabel(sourceLabel);
       const targetLabel = getSummaryTierLabel(targetTier);
       const candidates = getCandidatesForTier(targetTier);
+      const sourceMode = getSourceMode();
+      const chatMode = sourceMode === "chat";
       const requiredMin = normalizeSummaryMinChildren(
         getSavedSummaryTierMinimum(targetTier),
         getDefaultSummaryMinChildren(targetTier),
@@ -9907,7 +9992,8 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
           );
           statusEl.className = "info-block marginBot5";
         } else {
-          statusEl.textContent = `Need ${requiredMin} eligible ${sourcePlural}, have ${candidates.length}.`;
+          const availableLabel = chatMode ? "chat messages" : sourcePlural;
+          statusEl.textContent = `Need ${requiredMin} eligible ${availableLabel}, have ${candidates.length}.`;
           statusEl.className = locked
             ? "info-block warning marginBot5"
             : "info-block marginBot5";
@@ -9915,7 +10001,9 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
       }
       const tipEl = dlg.querySelector("#stmb-summary-tip");
       if (tipEl) {
-        tipEl.textContent = `Tip: uncheck ${sourcePlural.toLowerCase()} that should not be included.`;
+        tipEl.textContent = chatMode
+          ? translate("Select the chat messages that contain the inline summaries to consolidate.", "STMemoryBooks_Consolidation_ChatSourceTip")
+          : `Tip: uncheck ${sourcePlural.toLowerCase()} that should not be included.`;
       }
 
       const listEl = dlg.querySelector("#stmb-arc-list");
@@ -9936,7 +10024,7 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
       }
 
       if (popup.okButton) {
-        const runDisabled = isSourceLorebookLoading || !lorebookName || locked;
+        const runDisabled = isSourceLorebookLoading || !lorebookName || locked || (chatMode && targetTier !== 1);
         popup.okButton.disabled = runDisabled;
         popup.okButton.style.pointerEvents = runDisabled ? "none" : "";
         popup.okButton.style.opacity = runDisabled ? "0.5" : "";
@@ -9945,11 +10033,67 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
               "Loading Memory Book...",
               "STMemoryBooks_Consolidation_LoadingMemoryBook",
             )
+          : chatMode && targetTier !== 1
+          ? translate("Chat history sources can only create Arcs.", "STMemoryBooks_Consolidation_ChatSourceArcOnly")
           : locked
-          ? `Need at least ${requiredMin} eligible ${sourcePlural.toLowerCase()}`
+          ? `Need at least ${requiredMin} eligible ${(chatMode ? "chat messages" : sourcePlural.toLowerCase())}`
           : "";
       }
     };
+    const syncConsolidationSourceVisibility = () => {
+      const sourceMode = getSourceMode();
+      const chatMode = sourceMode === "chat";
+      dlg.querySelector("#stmb-consolidation-chat-source")?.classList.toggle("displayNone", !chatMode);
+      const lorebookControl = dlg.querySelector("#stmb-consolidation-lorebook")?.closest(".world_entry_form_control");
+      lorebookControl?.classList.toggle("displayNone", false);
+      const chatOption = dlg.querySelector('#stmb-consolidation-source option[value="chat"]');
+      if (chatOption) chatOption.disabled = getCurrentTargetTier() !== 1;
+      if (chatMode && getCurrentTargetTier() !== 1) {
+        dlg.querySelector("#stmb-consolidation-source").value = "lorebook";
+      }
+      renderTierState();
+    };
+    const updateChatSourceStatus = () => {
+      const status = dlg.querySelector("#stmb-consolidation-chat-status");
+      if (!status) return;
+      const count = chatSourceSelection?.messages?.length || 0;
+      status.textContent = count
+        ? tr("STMemoryBooks_Consolidation_ChatSelected", "{{count}} chat messages selected.", { count })
+        : translate("No chat messages selected.", "STMemoryBooks_Consolidation_ChatNoneSelected");
+    };
+    dlg.querySelector("#stmb-consolidation-select-chat")?.addEventListener("click", async (event) => {
+      event.preventDefault();
+      const selection = await showChatMessagePicker({
+        Popup,
+        popupType: POPUP_TYPE.TEXT,
+        affirmativeResult: POPUP_RESULT.AFFIRMATIVE,
+        tr,
+        markPopup: markStmbPopup,
+        initialSelection: chatSourceSelection,
+        getMessages: () => chat,
+        getChatKey: () => getStmbChatKey(getCurrentStmbChatRef()),
+        hasUnfinishedEdit: () => Boolean(document.querySelector("#chat .edit_textarea")),
+        subscribeChatChanged: (handler) => {
+          eventSource.on(event_types.CHAT_CHANGED, handler);
+          return () => eventSource.removeListener(event_types.CHAT_CHANGED, handler);
+        },
+        acceptLabel: translate("Use selected messages", "STMemoryBooks_Consolidation_UseSelectedChat"),
+      });
+      if (!selection) return;
+      try {
+        chatSourceEntries = buildChatConsolidationEntries(
+          chat,
+          selection,
+          getStmbChatKey(getCurrentStmbChatRef()),
+        );
+        chatSourceSelection = selection;
+        updateChatSourceStatus();
+        renderTierState();
+      } catch (error) {
+        toastr.error(error.message || String(error), "STMemoryBooks");
+      }
+    });
+    dlg.querySelector("#stmb-consolidation-source")?.addEventListener("change", syncConsolidationSourceVisibility);
     dlg
       .querySelector("#stmb-consolidation-lorebook")
       ?.addEventListener("change", async (event) => {
@@ -9999,7 +10143,7 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
       });
     dlg
       .querySelector("#stmb-summary-tier")
-      ?.addEventListener("change", renderTierState);
+      ?.addEventListener("change", syncConsolidationSourceVisibility);
     dlg
       .querySelector("#stmb-arc-minassigned")
       ?.addEventListener("input", () => {
@@ -10078,6 +10222,8 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
         }),
       );
     syncSummaryEntrySettingsVisibility();
+    syncConsolidationSourceVisibility();
+    updateChatSourceStatus();
     renderTierState();
 
     // Rebuild Arc prompts from built-ins with backup and refresh preset list
@@ -10161,11 +10307,28 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
       1,
       6,
     );
+    const chatSourceMode = getSourceMode() === "chat";
+    if (chatSourceMode && targetTier !== 1) {
+      toastr.error(
+        translate("Chat history sources can only create Arcs.", "STMemoryBooks_Consolidation_ChatSourceArcOnly"),
+        "STMemoryBooks",
+      );
+      return;
+    }
+    const chatSourceChatRef = chatSourceMode ? deepClone(getCurrentStmbChatRef()) : null;
     const sourceTier = getSourceTierForTarget(targetTier);
     const sourceLabel = getSummaryTierLabel(sourceTier);
     const targetLabel = getSummaryTierLabel(targetTier);
     const sourcePlural = pluralizeSummaryLabel(sourceLabel);
     const candidates = getCandidatesForTier(targetTier);
+    if (chatSourceMode) {
+      try {
+        verifyChatConsolidationEntries(chat, chatSourceEntries);
+      } catch (error) {
+        toastr.error(error.message || String(error), "STMemoryBooks");
+        return;
+      }
+    }
     const requiredMin = normalizeSummaryMinChildren(
       readIntInput(
         dlg.querySelector("#stmb-arc-minassigned"),
@@ -10263,6 +10426,21 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
     const selectedEntries = selected
       .map((id) => entryMap.get(String(id)))
       .filter(Boolean);
+    if (chatSourceMode && selectedEntries.length === 0) {
+      toastr.error(
+        translate("Select at least one chat message to consolidate.", "STMemoryBooks_Consolidation_SelectChatRequired"),
+        "STMemoryBooks",
+      );
+      return;
+    }
+    if (chatSourceMode) {
+      try {
+        verifyChatConsolidationEntries(chat, selectedEntries);
+      } catch (error) {
+        toastr.error(error.message || String(error), "STMemoryBooks");
+        return;
+      }
+    }
     const selectedCanonicalNumbers = new Set(
       selectedEntries.flatMap((entry) =>
         getEntrySourceCanonicalNumbers(entry, lorebookData),
@@ -10275,20 +10453,22 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
       lorebookName,
       lorebookData,
       selectedEntries,
-      sourceFingerprints: selectedSourceFingerprints,
+      sourceFingerprints: chatSourceMode ? {} : selectedSourceFingerprints,
       count: selectedEntries.length,
       requiredMin,
       role: "group",
-      entryMetadata: applyCharacterFilters ? buildManualGroupRoleMetadata("group") : null,
+      entryMetadata: chatSourceMode || !applyCharacterFilters
+        ? null
+        : buildManualGroupRoleMetadata("group"),
     }];
     let useGroupChatPrompt = false;
 
     try {
-      const boundLorebooks = lorebookName === configuredLorebookName
+      const boundLorebooks = !chatSourceMode && lorebookName === configuredLorebookName
         ? await getManualGroupConsolidationLorebooks(lorebookName, lorebookData, null, memoryBooksContext)
         : [{ role: "group", lorebookName, lorebookData, member: null, members: [] }];
       useGroupChatPrompt = hasGroupAndCharacterConsolidationTopology(boundLorebooks);
-      if (boundLorebooks.length > 1) {
+      if (!chatSourceMode && boundLorebooks.length > 1) {
         const readyItems = [];
         const skippedItems = [];
         for (const item of boundLorebooks) {
@@ -10389,6 +10569,7 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
           payload: {
             lorebookName: workItem.lorebookName,
             targetTier,
+            chatSourceMode,
             selectedEntries: deepClone(workItem.selectedEntries),
             sourceFingerprints: workItem.sourceFingerprints,
             presetKey: analysisOptions.presetKey,
@@ -10398,7 +10579,7 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
             maxPasses: analysisOptions.maxPasses,
             minAssigned: requiredMin,
             tokenTarget: analysisOptions.tokenTarget,
-            disableOriginals,
+            disableOriginals: chatSourceMode ? false : disableOriginals,
             summaryEntrySettings: chosenSummaryEntrySettings,
             summaryOrderMode: normalizedArcOrderMode,
             summaryOrderValue: chosenArcOrderValue,
@@ -10460,7 +10641,7 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
               lorebookData: freshLorebook,
               summaryCandidates: itemCandidates,
               targetTier,
-              disableOriginals,
+              disableOriginals: chatSourceMode ? false : disableOriginals,
               summaryEntrySettings: chosenSummaryEntrySettings,
               orderMode: normalizedArcOrderMode,
               orderValue: chosenArcOrderValue,
@@ -10608,6 +10789,8 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
         lorebookName,
         lorebookData,
         selectedEntries: primarySelectedEntries,
+        chatSourceMode,
+        chatSourceChatRef,
         options: primaryAnalysisOptions,
         disableOriginals,
         targetTier,
@@ -10666,6 +10849,8 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
         lorebookName,
         lorebookData,
         selectedEntries: primarySelectedEntries,
+        chatSourceMode,
+        chatSourceChatRef,
         options: primaryAnalysisOptions,
         disableOriginals,
         targetTier,
@@ -10731,18 +10916,23 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
               if (!freshLorebook?.entries) {
                 throw new Error(`Lorebook "${lorebookName}" could not be loaded.`);
               }
-              verifyConsolidationSourceFingerprints(
-                freshLorebook,
-                selectedSourceFingerprints,
-                collectSummaryMemberIds(candidates),
-              );
+              if (chatSourceMode) {
+                verifyChatConsolidationEntries(chat, selectedEntries);
+              } else {
+                verifyConsolidationSourceFingerprints(
+                  freshLorebook,
+                  selectedSourceFingerprints,
+                  collectSummaryMemberIds(candidates),
+                );
+              }
               result = await commitSummaryEntries({
                 consolidationRunId,
+                chatSourceMode,
                 lorebookName,
                 lorebookData: freshLorebook,
                 summaryCandidates: candidates,
                 targetTier,
-                disableOriginals,
+                disableOriginals: chatSourceMode ? false : disableOriginals,
                 summaryEntrySettings: chosenSummaryEntrySettings,
                 orderMode: normalizedArcOrderMode,
                 orderValue: chosenArcOrderValue,
@@ -10756,6 +10946,14 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
           },
         });
         const created = Number(previewResult?.created || 0);
+        if (chatSourceMode && created > 0) {
+          await applyChatConsolidationAutoHide({
+            chatRef: chatSourceChatRef,
+            selectedEntries,
+            candidates: previewResult?.committedCandidates || [],
+            disableOriginals,
+          });
+        }
         if (created > 0) {
           const createdLabel =
             created === 1
@@ -10795,12 +10993,16 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
     }
 
     try {
+      if (chatSourceMode) {
+        verifyChatConsolidationEntries(chat, selectedEntries);
+      }
       const res2 = await withStmbWriteLane({ type: "lorebook", name: lorebookName }, () => commitSummaryEntries({
+        chatSourceMode,
         lorebookName,
         lorebookData,
         summaryCandidates,
         targetTier,
-        disableOriginals,
+        disableOriginals: chatSourceMode ? false : disableOriginals,
         summaryEntrySettings: chosenSummaryEntrySettings,
         orderMode: normalizedArcOrderMode,
         orderValue: chosenArcOrderValue,
@@ -10832,6 +11034,14 @@ async function showSummaryConsolidationPopup(popupOptions = {}) {
         lorebookName,
         lorebookData,
       });
+      if (chatSourceMode) {
+        await applyChatConsolidationAutoHide({
+          chatRef: chatSourceChatRef,
+          selectedEntries,
+          candidates: summaryCandidates,
+          disableOriginals,
+        });
+      }
     } catch (e) {
       if (isStmbStopError(e)) {
         return;
@@ -13760,6 +13970,14 @@ async function applyManualFixedSummaryJson(correctedRaw) {
     }
 
     const selectedEntries = context.selectedEntries;
+    if (context.chatSourceMode) {
+      try {
+        verifyChatConsolidationEntries(chat, selectedEntries);
+      } catch (error) {
+        toastr.error(error.message || String(error), "STMemoryBooks");
+        return;
+      }
+    }
     const selectedUids = selectedEntries
       .map((e) => String(e?.uid))
       .filter(Boolean);
@@ -13846,11 +14064,12 @@ async function applyManualFixedSummaryJson(correctedRaw) {
     const targetTier = clampInt(Number(context?.targetTier ?? 1), 1, 6);
     const targetLabel = getSummaryTierLabel(targetTier);
     const res = await withStmbWriteLane({ type: "lorebook", name: context.lorebookName }, () => commitSummaryEntries({
+      chatSourceMode: context.chatSourceMode === true,
       lorebookName: context.lorebookName,
       lorebookData: context.lorebookData,
       summaryCandidates,
       targetTier,
-      disableOriginals: !!context.disableOriginals,
+      disableOriginals: context.chatSourceMode ? false : !!context.disableOriginals,
       summaryEntrySettings: fallbackSummaryEntrySettings,
       orderMode: context.summaryOrderMode || fallbackOrderMode,
       orderValue:
@@ -13864,6 +14083,15 @@ async function applyManualFixedSummaryJson(correctedRaw) {
       entryMetadata: context.entryMetadata,
       applyCharacterFilters: context.applyCharacterFilters,
     }));
+
+    if (context.chatSourceMode) {
+      await applyChatConsolidationAutoHide({
+        chatRef: context.chatSourceChatRef,
+        selectedEntries,
+        candidates: summaryCandidates,
+        disableOriginals: !!context.disableOriginals,
+      });
+    }
 
     const created = Array.isArray(res?.results)
       ? res.results.length

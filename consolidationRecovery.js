@@ -8,6 +8,7 @@ import { translate } from '../../../i18n.js';
 import { commitSummaryEntries, prepareSummaryCandidateKeywords, prepareSummaryCandidateTitle } from './arcanalysis.js';
 import { consolidationSourceContentHash, consolidationSourceHash, reconcileConsolidationCheckpoint } from './consolidationReceiptPolicy.js';
 import { getCurrentStmbChatRef, getStmbChatKey, withStmbWriteLane } from './stmbJobs.js';
+import { getConsolidationCheckpointSources as resolveCheckpointSources } from './consolidationCheckpointSources.js';
 
 const KEY = 'consolidationCheckpoints';
 let settingsWrite = Promise.resolve();
@@ -21,13 +22,12 @@ function makeId() {
     return globalThis.crypto?.randomUUID?.() || `stmb-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function sourceSnapshot(lorebook, candidate) {
-    const entries = Object.values(lorebook?.entries || {});
-    return (candidate.memberIds || []).map(id => {
-        const entry = entries.find(item => String(item.uid) === String(id));
-        if (!entry) throw new Error('A consolidation source is missing. Review the Memory Book.');
-        return { uid: String(id), hash: consolidationSourceHash(entry), contentHash: consolidationSourceContentHash(entry) };
-    });
+export function getConsolidationCheckpointSources(lorebook, candidate, chatSourceMode = false) {
+    return resolveCheckpointSources(lorebook, candidate, chatSourceMode).map(source => ({
+        uid: source.uid,
+        hash: consolidationSourceHash(source.entry),
+        contentHash: consolidationSourceContentHash(source.entry),
+    }));
 }
 
 /** A settings acknowledgement is required before any lorebook write. */
@@ -83,7 +83,7 @@ export async function resumeConsolidationCheckpoint(checkpoint) {
 /** Creates durable intents and commits one candidate at a time. */
 export async function commitSummaryEntriesRecoverable(options, onCheckpoint = null) {
     const { lorebookName, lorebookData, summaryCandidates = [], onCheckpoint: optionCheckpoint,
-        chatRef, consolidationRunId = makeId(), ...commitOptions } = options;
+        chatRef, chatSourceMode = false, consolidationRunId = makeId(), ...commitOptions } = options;
     if (commitOptions.targetTier === undefined) commitOptions.targetTier = 1;
     const results = [];
     for (const candidate of summaryCandidates) {
@@ -93,7 +93,7 @@ export async function commitSummaryEntriesRecoverable(options, onCheckpoint = nu
         );
         const checkpoint = {
             id: makeId(), runId: consolidationRunId, lorebookName, candidate: prepared,
-            sources: sourceSnapshot(lorebookData, prepared),
+            sources: getConsolidationCheckpointSources(lorebookData, prepared, chatSourceMode),
             options: structuredClone({ ...commitOptions, skipKeywordGeneration: true }), chatKey: getStmbChatKey(chatRef || getCurrentStmbChatRef()),
             status: 'pending', postEffectsDone: false, createdAt: Date.now(), error: null,
         };

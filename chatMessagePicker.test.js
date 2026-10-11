@@ -11,8 +11,9 @@ test('search covers the full chat, literal text, speaker names, and hidden messa
     const messages = Array.from({ length: 120 }, (_, i) => ({ name: 'Bot', mes: `message ${i}` }));
     messages[110] = { name: 'Alice', mes: 'secret [a.*]', is_system: true };
     assert.equal(findPickerMessages(messages).length, 120);
-    assert.deepEqual(findPickerMessages(messages, ' ALICE ').map(item => item.index), [110]);
+    assert.deepEqual(findPickerMessages(messages, ' ALICE ', false, true), []);
     assert.deepEqual(findPickerMessages(messages, '[A.*]').map(item => item.index), [110]);
+    assert.deepEqual(findPickerMessages(messages, 'message', false, true).map(item => item.index), [...Array.from({ length: 110 }, (_, i) => i), ...Array.from({ length: 9 }, (_, i) => i + 111)]);
     assert.equal(findPickerMessages(messages, '[aZZ]').length, 0);
     assert.deepEqual(findPickerMessages(messages, '', true).map(item => item.index), [110]);
     assert.equal(findPickerMessages(messages, 'message', true).length, 0);
@@ -117,13 +118,13 @@ test('picker retains selections across searches and filters, returns sorted hidd
         search('pear');
         assert.match(find(element => element.textContent.startsWith('Selected messages:')).textContent, /Outside displayed results: 1/);
         const hidden = find(element => element.tag === 'label').children[0];
-        hidden.checked = true;
+        hidden.checked = false;
         hidden.trigger('change');
         select(1);
         click('Continue');
         const selection = await pending;
         assert.deepEqual(selection.messages.map(item => item.index), [1, 2]);
-        assert.equal(selection.hiddenOnly, true);
+        assert.equal(selection.unhiddenOnly, false);
         assert.equal(selection.query, 'pear');
         assert.equal(hasListener(), false);
     });
