@@ -17,6 +17,10 @@ import {
   isRegenerationOnlyPreset,
   selectConsolidationDefaultPresetKey,
 } from './consolidationPromptPolicy.js';
+import {
+  getArcPromptLoadErrorMessage,
+  readArcPromptDocument,
+} from './arcPromptPersistencePolicy.js';
 
 export {
   isGroupChatOnlyPreset,
@@ -156,27 +160,19 @@ function getFallbackDefaultPresetKey(data = null) {
 async function loadOverrides(settings = null) {
   if (cachedOverrides) return cachedOverrides;
 
-  let mustWrite = false;
-  let data = null;
-
+  let response;
   try {
-    const response = await fetch(`/user/files/${PROMPTS_FILE}`, {
+    response = await fetch(`/user/files/${PROMPTS_FILE}`, {
       method: 'GET',
       credentials: 'include',
       headers: getRequestHeaders(),
     });
-    if (!response.ok) {
-      mustWrite = true;
-    } else {
-      const text = await response.text();
-      data = JSON.parse(text);
-      if (!validatePromptsFile(data)) {
-        mustWrite = true;
-      }
-    }
-  } catch {
-    mustWrite = true;
+  } catch (error) {
+    throw new Error(getArcPromptLoadErrorMessage(error));
   }
+  const loaded = await readArcPromptDocument(response, validatePromptsFile);
+  const mustWrite = loaded.missing;
+  let data = loaded.data;
 
   if (mustWrite) {
     const overrides = {};
